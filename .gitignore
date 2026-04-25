@@ -8,12 +8,35 @@ api-key.env
 # Output folders
 output_*/
 audio_test/
+test-results/
+
+# Asset folders (large media, not required for code)
+backgrounds/
+experiment-assets/
+characters/
+
+# Media files (generated/source assets)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.ogg
+*.flac
 
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
 
+# Local IDE/editor settings
+.claude/settings.local.json
+.vscode/
+.idea/
+
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
