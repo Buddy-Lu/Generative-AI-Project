@@ -41,33 +41,46 @@ def save_voice_config(cfg: dict):
 # ── Voice selection UI ────────────────────────────────────────────────────────
 
 def _pick_speaker(speakers: list[str], character: str, current: str) -> str:
-    """Interactive speaker picker with search filter."""
+    """Interactive speaker picker. Shows the list, accepts a number or a search filter."""
     print(f"\n  Picking voice for: {character}")
     if current:
         print(f"  Current: {current}  (press Enter to keep)")
 
+    matches = speakers
     while True:
-        query = input("  Search (partial name, or Enter to list all): ").strip().lower()
-        matches = [s for s in speakers if query in s.lower()] if query else speakers
-
-        if not matches:
-            print("  No matches. Try a different search term.")
-            continue
-
-        # Show up to 30 results
         shown = matches[:30]
+        print()
         for i, name in enumerate(shown, 1):
             print(f"    [{i:2d}] {name}")
         if len(matches) > 30:
-            print(f"    ... and {len(matches) - 30} more. Refine your search.")
+            print(f"    ... and {len(matches) - 30} more. Type text to filter.")
 
-        choice = input(f"\n  Enter number (1-{len(shown)}), search again, or Enter to keep current: ").strip()
+        prompt = f"\n  Number 1-{len(shown)} to pick, text to filter"
+        if current:
+            prompt += ", Enter to keep current"
+        prompt += ": "
+        choice = input(prompt).strip()
 
-        if not choice and current:
-            return current
-        if choice.isdigit() and 1 <= int(choice) <= len(shown):
-            return shown[int(choice) - 1]
-        print("  Invalid input — try again.")
+        if not choice:
+            if current:
+                return current
+            print("  No current voice — pick a number or type a search term.")
+            continue
+
+        if choice.isdigit():
+            n = int(choice)
+            if 1 <= n <= len(shown):
+                return shown[n - 1]
+            print(f"  Out of range. Pick 1-{len(shown)}.")
+            continue
+
+        q = choice.lower()
+        filtered = [s for s in speakers if q in s.lower()]
+        if not filtered:
+            print(f"  No speakers contain {choice!r}. Try another term.")
+            continue
+        matches = filtered
+        print(f"  {len(matches)} match(es) for {choice!r}:")
 
 
 def configure_voices():

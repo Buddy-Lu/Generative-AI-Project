@@ -9,6 +9,7 @@ Setup:
   - Config is saved to voice_config.json automatically
 """
 
+import json
 import os
 from pathlib import Path
 import requests
@@ -20,10 +21,12 @@ except ImportError:
     _HAS_MUTAGEN = False
 
 # ── VITS Umamusume config ─────────────────────────────────────────────────────
+# Space runs Gradio 5.x — endpoints are under /gradio_api with SSE result polling.
 VITS_SPACE_URL = "https://plachta-vits-umamusume-voice-synthesizer.hf.space"
+VITS_API_PREFIX = "/gradio_api"
+VITS_API_NAME  = "tts_fn"     # Gradio api_name for main TTS
 VITS_LANGUAGE  = "简体中文"   # Other options: "日本語", "English"
-VITS_FN_INDEX  = 0           # Gradio function index for main TTS
-VITS_TIMEOUT   = 120
+VITS_TIMEOUT   = 180
 
 # Populated at runtime by set_vits_voices() — called from main.py on startup
 VITS_VOICES: dict[str, str] = {
@@ -47,7 +50,10 @@ def get_vits_speakers() -> list[str]:
     """Fetch speaker dropdown choices from the Space's /config endpoint."""
     try:
         print("  Connecting to HuggingFace Space...")
-        r = requests.get(f"{VITS_SPACE_URL}/config", timeout=15)
+        r = requests.get(f"{VITS_SPACE_URL}{VITS_API_PREFIX}/config", timeout=15)
+        if r.status_code == 404:
+            # Older Gradio versions expose /config without the api prefix
+            r = requests.get(f"{VITS_SPACE_URL}/config", timeout=15)
         r.raise_for_status()
         config = r.json()
     except Exception as e:
@@ -70,28 +76,46 @@ def get_vits_speakers() -> list[str]:
 # ── Synthesis via direct HTTP ─────────────────────────────────────────────────
 
 def _vits_synthesize_one(text: str, speaker: str, output_path: str) -> str:
-    """POST to /run/predict with (text, speaker, language, speed), download audio."""
-    payload = {
-        "data":     [text, speaker, VITS_LANGUAGE, 1.0],
-        "fn_index": VITS_FN_INDEX,
-    }
-    r = requests.post(
-        f"{VITS_SPACE_URL}/run/predict",
-        json=payload,
-        timeout=VITS_TIMEOUT,
-    )
-    r.raise_for_status()
-    result = r.json()
+    """Gradio 5 SSE flow: POST /call/tts_fn -> event_id -> GET SSE -> download audio."""
+    # Inputs: [text, character, language, speed, symbol_input]
+    payload = {"data": [text, speaker, VITS_LANGUAGE, 1.0, False]}
 
-    data = result.get("data") or []
+    call_url = f"{VITS_SPACE_URL}{VITS_API_PREFIX}/call/{VITS_API_NAME}"
+    r = requests.post(call_url, json=payload, timeout=VITS_TIMEOUT)
+    r.raise_for_status()
+    event_id = r.json().get("event_id")
+    if not event_id:
+        raise RuntimeError(f"VITS did not return event_id: {r.text!r}")
+
+    sse = requests.get(f"{call_url}/{event_id}", stream=True, timeout=VITS_TIMEOUT)
+    sse.raise_for_status()
+
+    result = None
+    current_event = None
+    for raw in sse.iter_lines(decode_unicode=True):
+        if raw is None or raw == "":
+            continue
+        if raw.startswith("event:"):
+            current_event = raw.split(":", 1)[1].strip()
+        elif raw.startswith("data:"):
+            payload_str = raw[len("data:"):].strip()
+            if current_event == "complete":
+                result = json.loads(payload_str)
+                break
+            if current_event == "error":
+                raise RuntimeError(f"VITS error event: {payload_str}")
+    if result is None:
+        raise RuntimeError("VITS SSE stream ended without a complete event")
+
+    # result format: ["Success", {"path": ..., "url": ..., "meta": ...}]
     audio_info = next(
-        (item for item in data if isinstance(item, dict) and item.get("name")),
+        (item for item in result if isinstance(item, dict) and (item.get("url") or item.get("path"))),
         None,
     )
     if audio_info is None:
         raise RuntimeError(f"No audio in VITS response: {result!r}")
 
-    file_url = f"{VITS_SPACE_URL}/file={audio_info['name']}"
+    file_url = audio_info.get("url") or f"{VITS_SPACE_URL}{VITS_API_PREFIX}/file={audio_info['path']}"
     audio_r = requests.get(file_url, timeout=60)
     audio_r.raise_for_status()
 
@@ -127,7 +151,9 @@ def _vits_synthesize_all(items: list, output_dir: str) -> list[str]:
 def diagnose_vits():
     """Inspect the Space's /config and print component/function layout."""
     try:
-        r = requests.get(f"{VITS_SPACE_URL}/config", timeout=15)
+        r = requests.get(f"{VITS_SPACE_URL}{VITS_API_PREFIX}/config", timeout=15)
+        if r.status_code == 404:
+            r = requests.get(f"{VITS_SPACE_URL}/config", timeout=15)
         r.raise_for_status()
         config = r.json()
     except Exception as e:
@@ -136,6 +162,8 @@ def diagnose_vits():
 
     print(f"\n=== {VITS_SPACE_URL} ===")
     print(f"Gradio version: {config.get('version', 'unknown')}")
+    print(f"Protocol:       {config.get('protocol', 'unknown')}")
+    print(f"API prefix:     {config.get('api_prefix', '/')}")
 
     components = config.get("components", [])
     print(f"\nComponents ({len(components)}):")
@@ -150,7 +178,7 @@ def diagnose_vits():
     fns = config.get("dependencies", [])
     print(f"\nFunctions ({len(fns)}):")
     for i, fn in enumerate(fns):
-        print(f"  fn_index={i}  inputs={fn.get('inputs')}  outputs={fn.get('outputs')}")
+        print(f"  fn_index={i}  api_name={fn.get('api_name')!r}  inputs={fn.get('inputs')}  outputs={fn.get('outputs')}")
 
 
 # ── Audio duration ────────────────────────────────────────────────────────────

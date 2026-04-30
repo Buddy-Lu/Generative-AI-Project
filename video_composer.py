@@ -1,22 +1,25 @@
 """
-Video composer
-MoviePy + PIL: GTA background video + character sprites + subtitles + chart
+Video composer — MoviePy + PIL
 
-Install: pip install moviepy==2.1.1 Pillow numpy
-Font: auto-detects Windows CJK fonts, or set FONT_PATH env var
+Layout (720x1280, portrait, matches re-design.drawio.svg):
+  y=0-80     Topic title bar
+  y=90-490   gugugaga sprite (top-left, only when gugugaga speaks)
+  y=510-820  Center content area (chart or AI-image placeholder)
+  y=830-960  Karaoke subtitle band (animated word-by-word highlight)
+  y=970-1270 meowchan sprite (bottom-right, only when meowchan speaks)
+
+Only the speaking character is ever rendered — the silent character is hidden.
 """
 
 import os
 import random
-import textwrap
 import numpy as np
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from moviepy import (
     AudioFileClip,
-    ImageClip,
+    VideoClip,
     VideoFileClip,
-    CompositeVideoClip,
     concatenate_videoclips,
 )
 
@@ -24,37 +27,44 @@ from moviepy import (
 VIDEO_WIDTH = 720
 VIDEO_HEIGHT = 1280
 FPS = 24
-BG_COLOR = (10, 10, 18)          # Fallback solid background if no video found
-BG_VIDEO_PATH = "backgrounds/gta_footage.mp4"
-BG_DIM = 0.35                    # Background brightness (0=black, 1=full)
+BG_COLOR = (10, 10, 18)
+BG_VIDEO_DIR = "backgrounds"
+BG_DIM = 0.35
 
-# Character accent colors
+# ── Layout boxes (x1, y1, x2, y2) ─────────────────────────────────────────────
+TOPIC_BAR    = (0,    0,   720,   80)
+GUGUGAGA_BOX = (20,   90,  360,  490)   # top-left
+MEOWCHAN_BOX = (380, 970,  700, 1270)   # bottom-right
+CONTENT_BOX  = (20,  510,  700,  820)   # center chart / AI image
+SUBTITLE_BOX = (30,  830,  690,  960)   # karaoke band
+
 ROLE_COLORS = {
-    "gugugaga": (255, 140, 0),   # Orange
-    "meowchan": (0, 200, 180),   # Teal
+    "gugugaga": (255, 140, 0),
+    "meowchan": (0, 200, 180),
 }
 DEFAULT_COLOR = (160, 160, 160)
+ROLE_BOXES = {"gugugaga": GUGUGAGA_BOX, "meowchan": MEOWCHAN_BOX}
 
-# ── Font detection ────────────────────────────────────────────────────────────
+CHARACTER_IMAGES = {
+    "gugugaga": "characters/character2.png",
+    "meowchan": "characters/character1.png",
+}
+
 WINDOWS_FONTS = [
-    r"C:\Windows\Fonts\msjhbd.ttc",   # Microsoft JhengHei Bold
-    r"C:\Windows\Fonts\msjh.ttc",     # Microsoft JhengHei
-    r"C:\Windows\Fonts\arial.ttf",    # Arial fallback
-    r"C:\Windows\Fonts\calibri.ttf",  # Calibri fallback
+    r"C:\Windows\Fonts\msjhbd.ttc",
+    r"C:\Windows\Fonts\msjh.ttc",
+    r"C:\Windows\Fonts\arial.ttf",
+    r"C:\Windows\Fonts\calibri.ttf",
 ]
 
-# ── Character sprite settings ─────────────────────────────────────────────────
-CHARACTER_IMAGES = {
-    "gugugaga": "characters/character2.png",   # Penguin girl
-    "meowchan": "characters/character1.png",   # Cat-ear girl
-}
-CHAR_HEIGHT = 400       # Character sprite height (px)
-CHAR_MAX_WIDTH = 310    # Max width per character (prevents overlap)
-CHAR_SPEAK_SCALE = 1.0  # Scale when speaking
-CHAR_SILENT_SCALE = 0.78  # Scale when silent
-CHAR_SILENT_DIM = 0.35    # Brightness when silent
+SUBTITLE_FONT_SIZE = 34
+TOPIC_FONT_SIZE = 22
+PLACEHOLDER_FONT_SIZE = 28
 
+# ── Caches ────────────────────────────────────────────────────────────────────
 _char_cache: dict[str, Image.Image] = {}
+_font_path_cache: str | None = None
+_font_cache: dict[int, ImageFont.FreeTypeFont] = {}
 
 
 def _load_character(name: str) -> Image.Image | None:
@@ -66,10 +76,6 @@ def _load_character(name: str) -> Image.Image | None:
         _char_cache[name] = img
         return img
     return None
-
-
-_font_path_cache: str | None = None
-_font_cache: dict[int, ImageFont.FreeTypeFont] = {}
 
 
 def _get_font_path() -> str | None:
@@ -94,7 +100,7 @@ def _find_font(size: int) -> ImageFont.FreeTypeFont:
     if path:
         font = ImageFont.truetype(path, size)
     else:
-        print("Warning: No font found. Text may render as boxes. Set FONT_PATH env var.")
+        print("Warning: No font found. Set FONT_PATH env var.")
         font = ImageFont.load_default()
     _font_cache[size] = font
     return font
@@ -103,227 +109,364 @@ def _find_font(size: int) -> ImageFont.FreeTypeFont:
 # ── Background video helpers ──────────────────────────────────────────────────
 
 def _load_bg_video() -> VideoFileClip | None:
-    """Load background video. Returns None if not found."""
-    path = os.environ.get("BG_VIDEO_PATH", BG_VIDEO_PATH)
-    if not os.path.exists(path):
-        print(f"  Background video not found: {path}. Using solid color fallback.")
+    """Honors BG_VIDEO_PATH env var, else picks any video in backgrounds/."""
+    env_path = os.environ.get("BG_VIDEO_PATH")
+    if env_path:
+        candidates = [env_path] if os.path.exists(env_path) else []
+    else:
+        bg_dir = Path(BG_VIDEO_DIR)
+        candidates = sorted(
+            p for ext in ("*.mp4", "*.mov", "*.webm", "*.mkv")
+            for p in bg_dir.glob(ext)
+        ) if bg_dir.is_dir() else []
+
+    if not candidates:
+        print(f"  No background video found in {BG_VIDEO_DIR}/. Using solid color fallback.")
         return None
+
+    path = str(candidates[0])
     clip = VideoFileClip(path).resized((VIDEO_WIDTH, VIDEO_HEIGHT))
     print(f"  Background video loaded: {path} ({clip.duration:.1f}s)")
     return clip
 
 
 def _random_subclip(bg: VideoFileClip, duration: float) -> VideoFileClip:
-    """Pick a random segment from the background video matching the given duration."""
     max_start = max(0.0, bg.duration - duration - 0.1)
     start = random.uniform(0, max_start)
     return bg.subclipped(start, start + duration)
 
 
-def _apply_ui_overlay(bg_subclip: VideoFileClip, role: str, line: str,
-                       topic: str, chart_img: Image.Image | None) -> VideoFileClip:
-    """Composite static UI overlay (title + characters + bubble + chart) onto every video frame."""
-    ui_overlay = _make_ui_overlay(role, line, topic, chart_img)
-    ui_array = np.array(ui_overlay)  # H x W x 4 (RGBA)
+# ── Character rendering ──────────────────────────────────────────────────────
 
-    def process_frame(frame: np.ndarray) -> np.ndarray:
-        # Dim background
+def _paste_character(img: Image.Image, role: str) -> None:
+    """Paste the speaking character into their assigned corner with a soft glow."""
+    box = ROLE_BOXES.get(role)
+    if box is None:
+        return
+
+    char_img = _load_character(role)
+    x1, y1, x2, y2 = box
+    bw, bh = x2 - x1, y2 - y1
+
+    if char_img is None:
+        # Fallback: filled circle avatar with role label
+        draw = ImageDraw.Draw(img)
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        r = min(bw, bh) // 2 - 10
+        rc = ROLE_COLORS.get(role, DEFAULT_COLOR)
+        draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)], fill=rc + (230,))
+        draw.text((cx, cy), role, font=_find_font(32),
+                  fill=(255, 255, 255, 255), anchor="mm")
+        return
+
+    # Fit sprite into the corner box, preserve aspect
+    ratio = min(bw / char_img.width, bh / char_img.height)
+    target_w = int(char_img.width * ratio)
+    target_h = int(char_img.height * ratio)
+    resized = char_img.resize((target_w, target_h), Image.LANCZOS)
+
+    # Anchor: gugugaga at top-left of its box, meowchan at bottom-right
+    if role == "meowchan":
+        px = x2 - target_w
+        py = y2 - target_h
+    else:
+        px = x1
+        py = y2 - target_h  # bottom-aligned within top-left box
+
+    rc = ROLE_COLORS.get(role, DEFAULT_COLOR)
+    draw = ImageDraw.Draw(img)
+    for spread in range(20, 0, -3):
+        a = int(50 * (20 - spread) / 20)
+        draw.rounded_rectangle(
+            [(px - spread, py - spread),
+             (px + target_w + spread, py + target_h + spread)],
+            radius=18,
+            fill=rc + (a,),
+        )
+
+    img.paste(resized, (px, py), resized)
+
+
+# ── Static UI overlay (topic + speaker + chart + subtitle pill) ──────────────
+
+def _make_static_overlay(role: str, topic: str,
+                          chart_img: Image.Image | None) -> Image.Image:
+    """Pieces of the frame that don't change with time. Subtitle text drawn separately."""
+    img = Image.new("RGBA", (VIDEO_WIDTH, VIDEO_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    rc = ROLE_COLORS.get(role, DEFAULT_COLOR)
+
+    # Topic bar
+    tx1, ty1, tx2, ty2 = TOPIC_BAR
+    draw.rectangle([(tx1, ty1), (tx2, ty2)], fill=(10, 10, 25, 215))
+    draw.text(((tx1 + tx2) // 2, (ty1 + ty2) // 2), topic,
+              font=_find_font(TOPIC_FONT_SIZE),
+              fill=(200, 200, 220, 255), anchor="mm")
+
+    # Speaker only (silent character is hidden)
+    _paste_character(img, role)
+
+    # Center content
+    cx1, cy1, cx2, cy2 = CONTENT_BOX
+    cw, ch = cx2 - cx1, cy2 - cy1
+    if chart_img is not None:
+        draw.rounded_rectangle([(cx1, cy1), (cx2, cy2)], radius=14,
+                                fill=(5, 5, 15, 200),
+                                outline=(60, 60, 80, 220), width=2)
+        chart_resized = chart_img.copy().convert("RGBA")
+        chart_resized.thumbnail((cw - 24, ch - 24), Image.LANCZOS)
+        ix = cx1 + (cw - chart_resized.width) // 2
+        iy = cy1 + (ch - chart_resized.height) // 2
+        img.paste(chart_resized, (ix, iy), chart_resized)
+    else:
+        draw.rounded_rectangle([(cx1, cy1), (cx2, cy2)], radius=14,
+                                fill=(5, 5, 15, 180),
+                                outline=(80, 80, 100, 200), width=2)
+        draw.text(((cx1 + cx2) // 2, (cy1 + cy2) // 2),
+                  "[ AI image content ]",
+                  font=_find_font(PLACEHOLDER_FONT_SIZE),
+                  fill=(120, 120, 140, 220), anchor="mm")
+
+    # Subtitle pill (background only — text drawn in karaoke layer)
+    sx1, sy1, sx2, sy2 = SUBTITLE_BOX
+    draw.rounded_rectangle([(sx1, sy1), (sx2, sy2)], radius=20,
+                            fill=(10, 10, 25, 215),
+                            outline=rc + (220,), width=2)
+
+    return img
+
+
+# ── Karaoke subtitle ─────────────────────────────────────────────────────────
+
+def _is_cjk(text: str) -> bool:
+    return any('一' <= c <= '鿿' for c in text)
+
+
+def _build_unit_timings(text: str, duration: float):
+    """Distribute audio duration evenly across units (chars for CJK, words otherwise)."""
+    if _is_cjk(text):
+        units = [c for c in text if c.strip()]
+    else:
+        units = text.split()
+    if not units:
+        return []
+    per = duration / len(units)
+    return [(u, i * per, (i + 1) * per) for i, u in enumerate(units)]
+
+
+def _layout_subtitle(timings, font, max_w):
+    """Compute (idx, x, y, unit) positions and total height. Centered per line."""
+    if not timings:
+        return [], 0
+
+    is_cjk = _is_cjk("".join(u for u, _, _ in timings))
+    space_w = font.getbbox(" ")[2] - font.getbbox(" ")[0] if not is_cjk else 0
+    line_h = font.size + 10
+
+    widths = [font.getbbox(u)[2] - font.getbbox(u)[0] for u, _, _ in timings]
+
+    # Pack units into lines greedily
+    lines = []
+    cur_line, cur_w = [], 0
+    for i, ((unit, _, _), uw) in enumerate(zip(timings, widths)):
+        gap = 0 if (is_cjk or not cur_line) else space_w
+        if cur_line and cur_w + gap + uw > max_w:
+            lines.append(cur_line)
+            cur_line, cur_w = [], 0
+            gap = 0
+        cur_line.append((i, unit, uw, gap))
+        cur_w += gap + uw
+    if cur_line:
+        lines.append(cur_line)
+
+    positions = []
+    for li, line in enumerate(lines):
+        line_w = sum(uw + gap for _, _, uw, gap in line)
+        x = (max_w - line_w) // 2
+        y = li * line_h
+        for idx, unit, uw, gap in line:
+            x += gap
+            positions.append((idx, x, y, unit))
+            x += uw
+
+    return positions, len(lines) * line_h
+
+
+def _make_subtitle_text_layer(positions, total_h: int,
+                                current_idx: int, role_color: tuple) -> Image.Image:
+    """Render subtitle text with one unit highlighted. Returns full-frame RGBA."""
+    sx1, sy1, sx2, sy2 = SUBTITLE_BOX
+    sh = sy2 - sy1
+    layer = Image.new("RGBA", (VIDEO_WIDTH, VIDEO_HEIGHT), (0, 0, 0, 0))
+    if not positions:
+        return layer
+
+    draw = ImageDraw.Draw(layer)
+    font = _find_font(SUBTITLE_FONT_SIZE)
+    y_offset = sy1 + (sh - total_h) // 2
+
+    for idx, x, y, unit in positions:
+        if idx == current_idx:
+            fill = (255, 215, 90, 255)        # bright gold = active word
+        elif idx < current_idx:
+            fill = (230, 230, 245, 255)       # spoken
+        else:
+            fill = (140, 140, 165, 230)       # upcoming
+        draw.text((sx1 + x, y_offset + y), unit, font=font, fill=fill)
+
+    return layer
+
+
+# ── Per-line clip composition ────────────────────────────────────────────────
+
+def _build_dialogue_clip(bg_subclip, role: str, line: str, topic: str,
+                          chart_img: Image.Image | None,
+                          duration: float):
+    """Apply BG dim + static UI + animated karaoke subtitle to bg_subclip."""
+    rc = ROLE_COLORS.get(role, DEFAULT_COLOR)
+
+    static_arr = np.array(_make_static_overlay(role, topic, chart_img))
+    static_alpha = static_arr[:, :, 3:4].astype(np.float32) / 255.0
+    static_rgb = static_arr[:, :, :3].astype(np.float32)
+
+    timings = _build_unit_timings(line, duration)
+    font = _find_font(SUBTITLE_FONT_SIZE)
+    sx1, _, sx2, _ = SUBTITLE_BOX
+    max_w = sx2 - sx1 - 30
+    positions, total_h = _layout_subtitle(timings, font, max_w)
+
+    # Pre-render N+1 subtitle states (idx = -1 means "no current unit yet")
+    sub_layers = [
+        np.array(_make_subtitle_text_layer(positions, total_h, cur, rc))
+        for cur in range(-1, len(timings))
+    ]
+    sub_alphas = [layer[:, :, 3:4].astype(np.float32) / 255.0 for layer in sub_layers]
+    sub_rgbs = [layer[:, :, :3].astype(np.float32) for layer in sub_layers]
+
+    # Avoid Python loop in the hot path: precompute timing boundaries as arrays
+    starts = np.array([s for _, s, _ in timings] or [0.0])
+    ends = np.array([e for _, _, e in timings] or [0.0])
+
+    def process(get_frame, t):
+        frame = get_frame(t)
         bg = Image.fromarray(frame).convert("RGB")
         bg = ImageEnhance.Brightness(bg).enhance(BG_DIM)
-        bg_arr = np.array(bg, dtype=np.float32)
-        # Alpha composite UI
-        alpha = ui_array[:, :, 3:4].astype(np.float32) / 255.0
-        ui_rgb = ui_array[:, :, :3].astype(np.float32)
-        result = bg_arr * (1 - alpha) + ui_rgb * alpha
-        return result.clip(0, 255).astype(np.uint8)
+        out = np.array(bg, dtype=np.float32)
+        out = out * (1 - static_alpha) + static_rgb * static_alpha
 
-    return bg_subclip.image_transform(process_frame)
+        # Find current unit index at time t
+        if timings:
+            mask = (starts <= t) & (t < ends)
+            idx = int(np.argmax(mask)) if mask.any() else -1
+        else:
+            idx = -1
+        sa = sub_alphas[idx + 1]
+        sr = sub_rgbs[idx + 1]
+        out = out * (1 - sa) + sr * sa
 
+        return out.clip(0, 255).astype(np.uint8)
 
-def _wrap_line(text: str, font_size: int, max_px: int) -> list[str]:
-    """Wrap a single dialogue line for the subtitle bubble.
-    Chinese has no spaces so we split by character count; English uses word-wrap."""
-    if any('\u4e00' <= c <= '\u9fff' for c in text):
-        per_line = max(8, max_px // font_size)
-        return [text[i:i + per_line] for i in range(0, len(text), per_line)]
-    words_per_line = max(10, max_px // (font_size // 2))
-    return textwrap.wrap(text, width=words_per_line) or [text]
+    return bg_subclip.transform(process)
 
 
-def _make_ui_overlay(
-    role: str,
-    line: str,
-    topic: str,
-    chart_img: Image.Image | None = None,
-) -> Image.Image:
-    """
-    Generate RGBA overlay (transparent background, opaque UI elements).
+def _build_solid_clip(role: str, line: str, topic: str,
+                       chart_img: Image.Image | None,
+                       duration: float):
+    """Same as dialogue clip but with a solid-color background (no bg video)."""
+    rc = ROLE_COLORS.get(role, DEFAULT_COLOR)
 
-    Layout (720x1280):
-      0   - 75  : Top title bar (semi-transparent)
-      85  - 500 : Character sprites
-      500 - 570 : Character name labels
-      570 - 875 : Dialogue bubble
-      875 - 1280: Chart area
-    """
+    static_arr = np.array(_make_static_overlay(role, topic, chart_img))
+    static_alpha = static_arr[:, :, 3:4].astype(np.float32) / 255.0
+    static_rgb = static_arr[:, :, :3].astype(np.float32)
+
+    bg_solid = np.full((VIDEO_HEIGHT, VIDEO_WIDTH, 3), BG_COLOR, dtype=np.float32)
+    bg_with_ui = bg_solid * (1 - static_alpha) + static_rgb * static_alpha
+
+    timings = _build_unit_timings(line, duration)
+    font = _find_font(SUBTITLE_FONT_SIZE)
+    sx1, _, sx2, _ = SUBTITLE_BOX
+    max_w = sx2 - sx1 - 30
+    positions, total_h = _layout_subtitle(timings, font, max_w)
+
+    sub_layers = [
+        np.array(_make_subtitle_text_layer(positions, total_h, cur, rc))
+        for cur in range(-1, len(timings))
+    ]
+    sub_alphas = [layer[:, :, 3:4].astype(np.float32) / 255.0 for layer in sub_layers]
+    sub_rgbs = [layer[:, :, :3].astype(np.float32) for layer in sub_layers]
+
+    starts = np.array([s for _, s, _ in timings] or [0.0])
+    ends = np.array([e for _, _, e in timings] or [0.0])
+
+    def make_frame(t):
+        if timings:
+            mask = (starts <= t) & (t < ends)
+            idx = int(np.argmax(mask)) if mask.any() else -1
+        else:
+            idx = -1
+        out = bg_with_ui * (1 - sub_alphas[idx + 1]) + sub_rgbs[idx + 1] * sub_alphas[idx + 1]
+        return out.clip(0, 255).astype(np.uint8)
+
+    return VideoClip(make_frame, duration=duration)
+
+
+# ── End card ─────────────────────────────────────────────────────────────────
+
+def _make_end_card_overlay(topic: str, chart_img: Image.Image) -> Image.Image:
     img = Image.new("RGBA", (VIDEO_WIDTH, VIDEO_HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    role_color = ROLE_COLORS.get(role, DEFAULT_COLOR)
+    draw.rectangle([(0, 0), (VIDEO_WIDTH, 80)], fill=(10, 10, 25, 220))
+    draw.text((VIDEO_WIDTH // 2, 40), topic, font=_find_font(24),
+              fill=(200, 200, 230, 255), anchor="mm")
 
-    # 1. Top title bar
-    draw.rectangle([(0, 0), (VIDEO_WIDTH, 75)], fill=(10, 10, 25, 210))
-    draw.text(
-        (VIDEO_WIDTH // 2, 38),
-        topic,
-        font=_find_font(22),
-        fill=(200, 200, 220, 255),
-        anchor="mm",
-    )
+    chart_top = 120
+    chart_bottom = VIDEO_HEIGHT - 120
+    draw.rectangle([(15, chart_top - 10), (VIDEO_WIDTH - 15, chart_bottom + 10)],
+                    fill=(5, 5, 15, 200))
 
-    # 2. Character sprites
-    roles_order = ["gugugaga", "meowchan"]
-    positions = [VIDEO_WIDTH // 4, 3 * VIDEO_WIDTH // 4]
-    char_area_top = 85
-    char_area_bottom = 500
+    chart_w = VIDEO_WIDTH - 40
+    chart_h = chart_bottom - chart_top
+    chart_resized = chart_img.copy().convert("RGBA")
+    chart_resized.thumbnail((chart_w, chart_h), Image.LANCZOS)
+    cx = (VIDEO_WIDTH - chart_resized.width) // 2
+    cy = chart_top + (chart_h - chart_resized.height) // 2
+    img.paste(chart_resized, (cx, cy), chart_resized)
 
-    font_small = _find_font(18)
-
-    for r_name, x_center in zip(roles_order, positions):
-        r_color = ROLE_COLORS.get(r_name, DEFAULT_COLOR)
-        is_speaking = r_name == role
-
-        char_img = _load_character(r_name)
-
-        if char_img is not None:
-            # Scale sprite (cap width to prevent overlap)
-            scale = CHAR_SPEAK_SCALE if is_speaking else CHAR_SILENT_SCALE
-            target_h = int(CHAR_HEIGHT * scale)
-            ratio = target_h / char_img.height
-            target_w = int(char_img.width * ratio)
-            if target_w > CHAR_MAX_WIDTH:
-                target_w = CHAR_MAX_WIDTH
-                target_h = int(char_img.height * (CHAR_MAX_WIDTH / char_img.width))
-            resized = char_img.resize((target_w, target_h), Image.LANCZOS)
-
-            # Dim silent character
-            if not is_speaking:
-                r_ch, g_ch, b_ch, a_ch = resized.split()
-                rgb = Image.merge("RGB", (r_ch, g_ch, b_ch))
-                rgb = ImageEnhance.Brightness(rgb).enhance(CHAR_SILENT_DIM)
-                resized = Image.merge("RGBA", (*rgb.split(), a_ch))
-
-            # Glow halo for speaking character
-            if is_speaking:
-                glow_w = target_w + 20
-                glow_h = target_h + 20
-                gx = x_center - glow_w // 2
-                gy = char_area_bottom - target_h - 10
-                for spread in range(18, 0, -3):
-                    a = int(60 * (18 - spread) / 18)
-                    draw.rounded_rectangle(
-                        [(gx - spread, gy - spread),
-                         (gx + glow_w + spread, gy + glow_h + spread)],
-                        radius=16,
-                        fill=r_color + (a,),
-                    )
-
-            # Paste sprite (bottom-aligned to char_area_bottom)
-            paste_x = x_center - target_w // 2
-            paste_y = char_area_bottom - target_h
-            img.paste(resized, (paste_x, paste_y), resized)
-
-        else:
-            # Fallback: draw circle avatar
-            avatar_y = (char_area_top + char_area_bottom) // 2
-            avatar_r = 90
-            fill_color = r_color + (230,) if is_speaking else tuple(c // 3 for c in r_color) + (180,)
-            draw.ellipse(
-                [(x_center - avatar_r, avatar_y - avatar_r),
-                 (x_center + avatar_r, avatar_y + avatar_r)],
-                fill=fill_color,
-            )
-            draw.text(
-                (x_center, avatar_y),
-                r_name,
-                font=_find_font(28),
-                fill=(255, 255, 255, 255) if is_speaking else (100, 100, 100, 200),
-                anchor="mm",
-            )
-
-        # Character name label
-        label_y = char_area_bottom + 22
-        draw.text(
-            (x_center, label_y),
-            r_name,
-            font=_find_font(24),
-            fill=r_color + (255,) if is_speaking else (140, 140, 140, 180),
-            anchor="mm",
-        )
-
-        # "Speaking" indicator
-        if is_speaking:
-            draw.text(
-                (x_center, label_y + 32),
-                "▶ speaking",
-                font=font_small,
-                fill=r_color + (255,),
-                anchor="mm",
-            )
-
-    # 3. Dialogue bubble
-    bubble_top = 570
-    bubble_bottom = 875
-
-    draw.rounded_rectangle(
-        [(40, bubble_top), (VIDEO_WIDTH - 40, bubble_bottom)],
-        radius=20,
-        fill=(10, 10, 25, 200),
-        outline=role_color + (255,),
-        width=2,
-    )
-
-    font_sub = _find_font(34)
-    wrapped = _wrap_line(line, font_size=34, max_px=620)
-    text_block_height = len(wrapped) * 50
-    text_y_start = (bubble_top + bubble_bottom) // 2 - text_block_height // 2
-
-    for j, text_line in enumerate(wrapped):
-        draw.text(
-            (VIDEO_WIDTH // 2, text_y_start + j * 52),
-            text_line,
-            font=font_sub,
-            fill=(240, 240, 240, 255),
-            anchor="mm",
-        )
-
-    # 4. Chart area
-    if chart_img is not None:
-        chart_area_top = 875
-        chart_area_height = VIDEO_HEIGHT - chart_area_top - 20
-        chart_area_width = VIDEO_WIDTH - 40
-
-        draw.rectangle(
-            [(20, chart_area_top - 5), (VIDEO_WIDTH - 20, VIDEO_HEIGHT - 10)],
-            fill=(5, 5, 15, 190),
-        )
-
-        chart_resized = chart_img.copy().convert("RGBA")
-        chart_resized.thumbnail((chart_area_width, chart_area_height), Image.LANCZOS)
-        cx = (VIDEO_WIDTH - chart_resized.width) // 2
-        cy = chart_area_top + (chart_area_height - chart_resized.height) // 2
-        img.paste(chart_resized, (cx, cy), chart_resized)
-    else:
-        draw.rectangle([(0, 875), (VIDEO_WIDTH, VIDEO_HEIGHT)], fill=(5, 5, 15, 160))
-        draw.text(
-            (VIDEO_WIDTH // 2, (875 + VIDEO_HEIGHT) // 2),
-            "Finance News Short Video",
-            font=_find_font(20),
-            fill=(80, 80, 100, 200),
-            anchor="mm",
-        )
-
+    draw.rectangle([(0, VIDEO_HEIGHT - 80), (VIDEO_WIDTH, VIDEO_HEIGHT)],
+                    fill=(10, 10, 25, 200))
+    draw.text((VIDEO_WIDTH // 2, VIDEO_HEIGHT - 40),
+              "Data for reference only. Invest responsibly.",
+              font=_find_font(18), fill=(150, 150, 170, 220), anchor="mm")
     return img
+
+
+def _apply_end_card_overlay(bg_subclip, topic: str, chart_img: Image.Image):
+    ui_arr = np.array(_make_end_card_overlay(topic, chart_img))
+    alpha = ui_arr[:, :, 3:4].astype(np.float32) / 255.0
+    rgb = ui_arr[:, :, :3].astype(np.float32)
+
+    def process(frame):
+        bg = Image.fromarray(frame).convert("RGB")
+        bg = ImageEnhance.Brightness(bg).enhance(BG_DIM * 0.7)
+        bg_arr = np.array(bg, dtype=np.float32)
+        out = bg_arr * (1 - alpha) + rgb * alpha
+        return out.clip(0, 255).astype(np.uint8)
+
+    return bg_subclip.image_transform(process)
+
+
+def _build_solid_end_card(topic: str, chart_img: Image.Image, duration: float):
+    bg_solid = np.full((VIDEO_HEIGHT, VIDEO_WIDTH, 3), (8, 8, 15), dtype=np.float32)
+    ui_arr = np.array(_make_end_card_overlay(topic, chart_img))
+    alpha = ui_arr[:, :, 3:4].astype(np.float32) / 255.0
+    rgb = ui_arr[:, :, :3].astype(np.float32)
+    composed = (bg_solid * (1 - alpha) + rgb * alpha).clip(0, 255).astype(np.uint8)
+
+    def make_frame(_t):
+        return composed
+    return VideoClip(make_frame, duration=duration)
 
 
 # ── Main compose function ─────────────────────────────────────────────────────
@@ -335,16 +478,7 @@ def compose_video(
     output_path: str = "output.mp4",
     end_card_duration: float = 4.0,
 ) -> str:
-    """
-    Compose the final video.
-
-    Args:
-        audio_data: return value from tts_generator.generate_audio_files()
-        topic: news headline (shown in title bar)
-        chart_path: path to chart PNG (optional)
-        output_path: output .mp4 path
-        end_card_duration: seconds to show the final chart card
-    """
+    """Stitch dialogue clips + end card into the final mp4."""
     print(f"\nComposing video ({len(audio_data)} dialogue segments)...")
 
     chart_img = None
@@ -360,23 +494,24 @@ def compose_video(
 
         if bg_video is not None:
             bg_sub = _random_subclip(bg_video, duration)
-            video_clip = _apply_ui_overlay(bg_sub, item["role"], item["line"], topic, chart_img)
+            video_clip = _build_dialogue_clip(
+                bg_sub, item["role"], item["line"], topic, chart_img, duration
+            )
         else:
-            frame = _make_frame_solid(item["role"], item["line"], topic, chart_img)
-            video_clip = ImageClip(frame).with_duration(duration)
+            video_clip = _build_solid_clip(
+                item["role"], item["line"], topic, chart_img, duration
+            )
 
         audio_clip = AudioFileClip(item["audio_path"])
         clips.append(video_clip.with_audio(audio_clip))
 
-    # End card
     if chart_img is not None:
         print("  Adding end chart card...")
         if bg_video is not None:
             bg_sub = _random_subclip(bg_video, end_card_duration)
             end_clip = _apply_end_card_overlay(bg_sub, topic, chart_img)
         else:
-            end_frame = _make_end_card_solid(topic, chart_img)
-            end_clip = ImageClip(end_frame).with_duration(end_card_duration)
+            end_clip = _build_solid_end_card(topic, chart_img, end_card_duration)
         clips.append(end_clip)
 
     if bg_video is not None:
@@ -403,83 +538,6 @@ def compose_video(
 
     print(f"Video saved: {output_path}")
     return output_path
-
-
-def _apply_end_card_overlay(bg_subclip: VideoFileClip, topic: str,
-                              chart_img: Image.Image) -> VideoFileClip:
-    """End card: full-screen chart overlaid on background video."""
-    ui = _make_end_card_ui(topic, chart_img)
-    ui_array = np.array(ui)
-
-    def process_frame(frame: np.ndarray) -> np.ndarray:
-        bg = Image.fromarray(frame).convert("RGB")
-        bg = ImageEnhance.Brightness(bg).enhance(BG_DIM * 0.7)
-        bg_arr = np.array(bg, dtype=np.float32)
-        alpha = ui_array[:, :, 3:4].astype(np.float32) / 255.0
-        ui_rgb = ui_array[:, :, :3].astype(np.float32)
-        result = bg_arr * (1 - alpha) + ui_rgb * alpha
-        return result.clip(0, 255).astype(np.uint8)
-
-    return bg_subclip.image_transform(process_frame)
-
-
-def _make_end_card_ui(topic: str, chart_img: Image.Image) -> Image.Image:
-    """End card RGBA overlay."""
-    img = Image.new("RGBA", (VIDEO_WIDTH, VIDEO_HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    draw.rectangle([(0, 0), (VIDEO_WIDTH, 80)], fill=(10, 10, 25, 220))
-    draw.text(
-        (VIDEO_WIDTH // 2, 40),
-        topic,
-        font=_find_font(24),
-        fill=(200, 200, 230, 255),
-        anchor="mm",
-    )
-
-    chart_area_top = 120
-    chart_area_bottom = VIDEO_HEIGHT - 120
-    draw.rectangle(
-        [(15, chart_area_top - 10), (VIDEO_WIDTH - 15, chart_area_bottom + 10)],
-        fill=(5, 5, 15, 200),
-    )
-
-    chart_area_w = VIDEO_WIDTH - 40
-    chart_area_h = chart_area_bottom - chart_area_top
-    chart_resized = chart_img.copy().convert("RGBA")
-    chart_resized.thumbnail((chart_area_w, chart_area_h), Image.LANCZOS)
-    cx = (VIDEO_WIDTH - chart_resized.width) // 2
-    cy = chart_area_top + (chart_area_h - chart_resized.height) // 2
-    img.paste(chart_resized, (cx, cy), chart_resized)
-
-    draw.rectangle([(0, VIDEO_HEIGHT - 80), (VIDEO_WIDTH, VIDEO_HEIGHT)], fill=(10, 10, 25, 200))
-    draw.text(
-        (VIDEO_WIDTH // 2, VIDEO_HEIGHT - 40),
-        "Data for reference only. Invest responsibly.",
-        font=_find_font(18),
-        fill=(150, 150, 170, 220),
-        anchor="mm",
-    )
-
-    return img
-
-
-# ── Fallback solid-color background ──────────────────────────────────────────
-
-def _make_frame_solid(role, line, topic, chart_img=None) -> np.ndarray:
-    img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), BG_COLOR)
-    overlay = _make_ui_overlay(role, line, topic, chart_img).convert("RGBA")
-    base = img.convert("RGBA")
-    composite = Image.alpha_composite(base, overlay)
-    return np.array(composite.convert("RGB"))
-
-
-def _make_end_card_solid(topic, chart_img) -> np.ndarray:
-    img = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), (8, 8, 15))
-    overlay = _make_end_card_ui(topic, chart_img).convert("RGBA")
-    base = img.convert("RGBA")
-    composite = Image.alpha_composite(base, overlay)
-    return np.array(composite.convert("RGB"))
 
 
 if __name__ == "__main__":
