@@ -20,19 +20,77 @@ import websockets
 
 
 ACTIVE_WORKFLOW_PATH = os.getenv("ACTIVE_WORKFLOW_PATH", "active_workflow.json")
+WORKFLOWS_DIR        = os.getenv("WORKFLOWS_DIR", "workflows")
+WORKFLOWS_ACTIVE_PTR = os.path.join(WORKFLOWS_DIR, "_active.txt")
 
 
 # ── Active workflow management ────────────────────────────────────────────────
 
-def _load_active_workflow() -> dict | None:
-    """Return user's saved workflow, or None if not set."""
-    if not os.path.exists(ACTIVE_WORKFLOW_PATH):
-        return None
+def _sanitize_wf_name(name: str) -> str:
+    """Sanitize a user-supplied workflow name for use as a filename."""
+    safe = "".join(c for c in name if c.isalnum() or c in "-_ ").strip()
+    safe = "_".join(safe.split())[:64]
+    return safe or f"wf_{uuid.uuid4().hex[:6]}"
+
+
+def _wf_path(name: str) -> Path:
+    return Path(WORKFLOWS_DIR) / f"{name}.json"
+
+
+def get_active_wf_name() -> str | None:
+    """Return the name of the currently active workflow (or None)."""
     try:
-        with open(ACTIVE_WORKFLOW_PATH, encoding="utf-8") as f:
-            return json.load(f)
+        with open(WORKFLOWS_ACTIVE_PTR, encoding="utf-8") as f:
+            name = f.read().strip()
+        if name and _wf_path(name).is_file():
+            return name
     except Exception:
-        return None
+        pass
+    return None
+
+
+def set_active_wf_name(name: str | None) -> None:
+    """Set / clear the active workflow pointer."""
+    Path(WORKFLOWS_DIR).mkdir(exist_ok=True)
+    if name is None:
+        try:
+            os.remove(WORKFLOWS_ACTIVE_PTR)
+        except FileNotFoundError:
+            pass
+    else:
+        with open(WORKFLOWS_ACTIVE_PTR, "w", encoding="utf-8") as f:
+            f.write(name)
+
+
+def _migrate_legacy_workflow() -> None:
+    """One-time migration: move legacy active_workflow.json into the workflows dir."""
+    if os.path.exists(ACTIVE_WORKFLOW_PATH):
+        Path(WORKFLOWS_DIR).mkdir(exist_ok=True)
+        target = _wf_path("imported")
+        if not target.exists():
+            try:
+                with open(ACTIVE_WORKFLOW_PATH, encoding="utf-8") as f:
+                    data = f.read()
+                with open(target, "w", encoding="utf-8") as f:
+                    f.write(data)
+                os.remove(ACTIVE_WORKFLOW_PATH)
+                set_active_wf_name("imported")
+            except Exception:
+                pass
+
+
+def _load_active_workflow() -> dict | None:
+    """Return user's currently active workflow, or None if none set."""
+    _migrate_legacy_workflow()
+
+    name = get_active_wf_name()
+    if name:
+        try:
+            with open(_wf_path(name), encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
 
 
 def validate_workflow(wf: dict) -> tuple[bool, str]:

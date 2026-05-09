@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1048,76 +1048,126 @@ async def get_stats():
 
 @app.get("/api/comfyui/default-workflow")
 async def get_default_workflow():
-    """Return the default ComfyUI workflow JSON (drag this into the editor)."""
-    # Bypass active workflow override — return only the built-in default
-    from character_generator import ACTIVE_WORKFLOW_PATH as _AWP
-    saved = None
-    if os.path.exists(_AWP):
-        os.rename(_AWP, _AWP + ".bak_tmp")
-        saved = _AWP + ".bak_tmp"
+    """Return the built-in default workflow JSON (ignores any active override)."""
+    from character_generator import (
+        WORKFLOWS_ACTIVE_PTR, _build_workflow, get_active_wf_name, set_active_wf_name,
+    )
+    # Temporarily clear the active pointer so _build_workflow returns the default
+    saved_active = get_active_wf_name()
+    set_active_wf_name(None)
     try:
-        from character_generator import _build_workflow
-        workflow = _build_workflow("1girl, solo, financial analyst, anime style, simple background")
+        workflow = _build_workflow(
+            "1girl, solo, financial analyst, anime style, simple background"
+        )
     finally:
-        if saved:
-            os.rename(saved, _AWP)
+        if saved_active:
+            set_active_wf_name(saved_active)
     return workflow
 
 
-@app.get("/api/comfyui/workflow/info")
-async def get_workflow_info():
-    """Return info about the currently active (custom) workflow."""
-    from character_generator import ACTIVE_WORKFLOW_PATH as _AWP
-    if not os.path.exists(_AWP):
-        return {"active": False}
-    try:
-        with open(_AWP, encoding="utf-8") as f:
-            wf = json.load(f)
-        mtime = os.path.getmtime(_AWP)
-        node_types: dict[str, int] = {}
-        for n in wf.values():
-            if isinstance(n, dict):
-                t = n.get("class_type", "?")
-                node_types[t] = node_types.get(t, 0) + 1
-        return {
-            "active":     True,
-            "node_count": len(wf),
-            "modified":   datetime.fromtimestamp(mtime).isoformat(),
+@app.get("/api/comfyui/workflows")
+async def list_workflows():
+    """List all saved workflows + which one is active."""
+    from character_generator import WORKFLOWS_DIR, get_active_wf_name
+    Path(WORKFLOWS_DIR).mkdir(exist_ok=True)
+    active = get_active_wf_name()
+
+    workflows: list[dict] = []
+    for p in sorted(
+        (p for p in Path(WORKFLOWS_DIR).glob("*.json")),
+        key=lambda x: x.stat().st_mtime,
+        reverse=True,
+    ):
+        try:
+            with open(p, encoding="utf-8") as f:
+                wf = json.load(f)
+            node_count = len(wf) if isinstance(wf, dict) else 0
+            node_types: dict[str, int] = {}
+            for n in wf.values() if isinstance(wf, dict) else []:
+                if isinstance(n, dict):
+                    t = n.get("class_type", "?")
+                    node_types[t] = node_types.get(t, 0) + 1
+        except Exception:
+            node_count = 0
+            node_types = {}
+        workflows.append({
+            "name":       p.stem,
+            "node_count": node_count,
             "node_types": node_types,
-        }
-    except Exception as exc:
-        return {"active": False, "error": str(exc)}
+            "modified":   datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
+        })
+    return {"active": active, "workflows": workflows}
 
 
-@app.post("/api/comfyui/workflow")
-async def upload_workflow(file: UploadFile = File(...)):
-    """Upload a custom ComfyUI API-format workflow JSON."""
+@app.post("/api/comfyui/workflows")
+async def upload_named_workflow(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+):
+    """Upload a workflow with a name. Auto-activates the newly uploaded one."""
     if not file.filename or not file.filename.lower().endswith(".json"):
         raise HTTPException(400, "File must be a .json file")
-
     content = await file.read()
     try:
         wf = json.loads(content.decode("utf-8"))
     except Exception:
         raise HTTPException(400, "Invalid JSON")
 
-    from character_generator import validate_workflow, ACTIVE_WORKFLOW_PATH as _AWP
+    from character_generator import (
+        validate_workflow, _sanitize_wf_name, _wf_path, set_active_wf_name, WORKFLOWS_DIR,
+    )
     ok, reason = validate_workflow(wf)
     if not ok:
         raise HTTPException(400, reason)
 
-    with open(_AWP, "w", encoding="utf-8") as f:
+    Path(WORKFLOWS_DIR).mkdir(exist_ok=True)
+    safe = _sanitize_wf_name(name)
+    with open(_wf_path(safe), "w", encoding="utf-8") as f:
         json.dump(wf, f, ensure_ascii=False, indent=2)
-    return {"ok": True, "node_count": len(wf)}
+    set_active_wf_name(safe)
+    return {"ok": True, "name": safe, "node_count": len(wf)}
 
 
-@app.delete("/api/comfyui/workflow")
-async def reset_workflow():
-    """Remove custom workflow, revert to built-in default."""
-    from character_generator import ACTIVE_WORKFLOW_PATH as _AWP
-    if os.path.exists(_AWP):
-        os.remove(_AWP)
+@app.post("/api/comfyui/workflows/{name}/activate")
+async def activate_named_workflow(name: str):
+    from character_generator import _wf_path, set_active_wf_name
+    if not _wf_path(name).is_file():
+        raise HTTPException(404, "Workflow not found")
+    set_active_wf_name(name)
+    return {"ok": True, "active": name}
+
+
+@app.delete("/api/comfyui/workflows/{name}")
+async def delete_named_workflow(name: str):
+    from character_generator import _wf_path, get_active_wf_name, set_active_wf_name
+    path = _wf_path(name)
+    if not path.is_file():
+        raise HTTPException(404, "Workflow not found")
+    if get_active_wf_name() == name:
+        set_active_wf_name(None)
+    path.unlink()
     return {"ok": True}
+
+
+@app.post("/api/comfyui/workflows/deactivate")
+async def deactivate_workflow():
+    """Use built-in default without deleting any saved workflow."""
+    from character_generator import set_active_wf_name
+    set_active_wf_name(None)
+    return {"ok": True}
+
+
+@app.get("/api/comfyui/workflows/{name}/download")
+async def download_named_workflow(name: str):
+    from character_generator import _wf_path
+    path = _wf_path(name)
+    if not path.is_file():
+        raise HTTPException(404, "Workflow not found")
+    return FileResponse(
+        str(path),
+        filename=f"{name}.json",
+        media_type="application/json",
+    )
 
 
 # ── ComfyUI config endpoints ──────────────────────────────────────────────────

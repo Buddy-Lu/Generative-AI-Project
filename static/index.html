@@ -666,6 +666,53 @@ video#videoPlayer {
 }
 .comfyui-wf-status .wf-meta { font-size: 10px; opacity: .75; font-family: 'JetBrains Mono', monospace; }
 
+/* Workflow list */
+.wf-list {
+  margin-top: 10px; display: flex; flex-direction: column; gap: 6px;
+}
+.wf-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 7px;
+  border: 1.5px solid var(--border); background: var(--surface-2);
+  cursor: pointer; transition: border-color .15s, background .15s;
+}
+.wf-item:hover { border-color: var(--border-2); background: var(--surface); }
+.wf-item.active {
+  border-color: var(--accent); background: var(--accent-dim);
+}
+.wf-radio {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--border-2); flex-shrink: 0; position: relative;
+}
+.wf-item.active .wf-radio {
+  border-color: var(--accent); background: var(--accent);
+  box-shadow: 0 0 6px rgba(245,158,11,.5);
+}
+.wf-item.active .wf-radio::after {
+  content: ''; position: absolute; inset: 3px; border-radius: 50%; background: #000;
+}
+.wf-name {
+  flex: 1; font-size: 13px; font-weight: 500; color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wf-item.active .wf-name { color: var(--accent); }
+.wf-meta {
+  font-size: 10.5px; color: var(--text-dim); flex-shrink: 0;
+}
+.wf-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.wf-act-btn {
+  padding: 3px 7px; border-radius: 5px; font-size: 11px;
+  border: 1px solid var(--border-2); background: transparent;
+  color: var(--text-mid); cursor: pointer; transition: all .12s;
+}
+.wf-act-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--surface); }
+.wf-act-btn.danger:hover { border-color: var(--error); color: var(--error); }
+.wf-empty {
+  text-align: center; padding: 14px; color: var(--text-dim); font-size: 12px;
+  border: 1.5px dashed var(--border-2); border-radius: 7px;
+}
+
 /* ── Hidden util ── */
 .hidden { display: none !important; }
 </style>
@@ -749,16 +796,16 @@ video#videoPlayer {
     <div class="comfyui-editor-bar">
       <button class="btn btn-outline" id="comfyuiOpenTabBtn">🎨 在新分頁開啟編輯器</button>
       <button class="btn btn-ghost"   id="comfyuiDlWorkflowBtn">⬇ 下載預設</button>
-      <button class="btn btn-ghost"   id="comfyuiUploadWfBtn">⬆ 上傳自訂 Workflow</button>
+      <button class="btn btn-ghost"   id="comfyuiUploadWfBtn">⬆ 上傳新 Workflow</button>
       <input type="file" id="comfyuiWfFileInput" accept=".json,application/json" style="display:none">
-      <button class="btn btn-ghost"   id="comfyuiResetWfBtn" style="display:none">↻ 還原預設</button>
     </div>
-    <div class="comfyui-wf-status" id="comfyuiWfStatus">
-      ◆ 使用內建預設 workflow（Animagine XL · 28 steps）
-    </div>
-    <div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.65">
-      編輯流程：ComfyUI 內 <b>Workflow → Export (API Format)</b> → 上傳到這裡 → 生成時自動套用<br>
-      可在正向 prompt 節點寫 <code style="color:var(--accent);background:var(--surface-2);padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace">{prompt}</code> 當佔位符（例：<code style="color:var(--text-mid);background:var(--surface-2);padding:1px 5px;border-radius:3px">masterpiece, {prompt}, best quality</code>）
+
+    <!-- Saved workflows list -->
+    <div class="wf-list" id="comfyuiWfList"></div>
+
+    <div style="font-size:11px;color:var(--text-dim);margin-top:10px;line-height:1.65">
+      編輯流程：ComfyUI 內 <b>Workflow → Export (API Format)</b> → 上傳 → 生成時自動套用<br>
+      勾選圓點切換使用中 workflow · 在 prompt 節點寫 <code style="color:var(--accent);background:var(--surface-2);padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace">{prompt}</code> 作佔位符
     </div>
   </div>
 
@@ -1565,6 +1612,9 @@ function charRenderGrid() {
     wrap.className = 'lib-img-wrap';
     const img = document.createElement('img');
     img.src = url; img.alt = filename; img.loading = 'lazy';
+    img.style.cursor = 'zoom-in';
+    img.title = '點擊放大預覽';
+    img.onclick = (e) => { e.stopPropagation(); openLightbox(url); };
     wrap.appendChild(img);
 
     if (isG || isM) {
@@ -2148,7 +2198,12 @@ async function doGenerateChar(role) {
           es.close();
           resultEl.innerHTML =
             `<span style="color:var(--success)">✓ 生成完成！${role ? ` 已指派給 ${roleLabel}` : ''}</span>` +
-            `<img src="${data.url}" style="height:64px;border-radius:6px;border:1px solid var(--border);object-fit:contain;background:#0c101e">`;
+            `<img src="${data.url}" alt="${data.filename}" title="點擊放大" ` +
+              `style="height:64px;border-radius:6px;border:1px solid var(--border);` +
+              `object-fit:contain;background:#0c101e;cursor:zoom-in;transition:transform .15s" ` +
+              `onmouseenter="this.style.transform='scale(1.08)'" ` +
+              `onmouseleave="this.style.transform='scale(1)'" ` +
+              `onclick="openLightbox('${data.url}')">`;
           showToast(`✓ 角色圖片已生成：${data.filename}`);
           resolve();
         }
@@ -2184,34 +2239,116 @@ $('comfyuiOpenTabBtn').onclick = () => {
   window.open(url, '_blank');
 };
 
-// Refresh workflow status badge
+// ── Workflow library ───────────────────────────────────────────────────────
+
 async function refreshWorkflowStatus() {
-  const status   = $('comfyuiWfStatus');
-  const resetBtn = $('comfyuiResetWfBtn');
+  const list = $('comfyuiWfList');
   try {
-    const info = await api('/api/comfyui/workflow/info');
-    if (info.active) {
-      const types = info.node_types
-        ? Object.entries(info.node_types).map(([k, v]) => v > 1 ? `${k}×${v}` : k).join(' · ')
-        : '';
-      const ts = info.modified ? new Date(info.modified).toLocaleString() : '';
-      status.classList.add('active');
-      status.innerHTML = `
-        <span>✓ 使用自訂 workflow · ${info.node_count} 個節點</span>
-        <span class="wf-meta">${ts}</span>
-      `;
-      resetBtn.style.display = '';
-      if (types) status.title = types;
+    const { active, workflows } = await api('/api/comfyui/workflows');
+    list.innerHTML = '';
+
+    // Built-in default row (always present)
+    list.appendChild(_makeWfRow({
+      name: '__default__',
+      label: '內建預設 (Animagine XL · 28 steps)',
+      meta: '',
+      active: !active,
+      isDefault: true,
+    }));
+
+    if (!workflows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'wf-empty';
+      empty.textContent = '尚未上傳任何 workflow · 點「⬆ 上傳新 Workflow」開始';
+      list.appendChild(empty);
     } else {
-      status.classList.remove('active');
-      status.innerHTML = `<span>◆ 使用內建預設 workflow（Animagine XL · 28 steps）</span>`;
-      resetBtn.style.display = 'none';
+      workflows.forEach(wf => {
+        const ts = wf.modified ? new Date(wf.modified).toLocaleString() : '';
+        list.appendChild(_makeWfRow({
+          name: wf.name,
+          label: wf.name,
+          meta: `${wf.node_count} 節點 · ${ts}`,
+          active: wf.name === active,
+          nodeTypes: wf.node_types,
+        }));
+      });
     }
-  } catch {
-    status.classList.remove('active');
-    status.innerHTML = `<span>◆ 使用內建預設 workflow</span>`;
-    resetBtn.style.display = 'none';
+  } catch (e) {
+    list.innerHTML = `<div class="wf-empty" style="color:var(--error)">載入失敗: ${e.message}</div>`;
   }
+}
+
+function _makeWfRow({ name, label, meta, active, isDefault, nodeTypes }) {
+  const item = document.createElement('div');
+  item.className = 'wf-item' + (active ? ' active' : '');
+
+  const radio = document.createElement('div');
+  radio.className = 'wf-radio';
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'wf-name';
+  nameEl.textContent = label;
+  if (nodeTypes) {
+    const types = Object.entries(nodeTypes)
+      .map(([k, v]) => v > 1 ? `${k}×${v}` : k).join(' · ');
+    nameEl.title = types;
+  }
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'wf-meta';
+  metaEl.textContent = meta;
+
+  const acts = document.createElement('div');
+  acts.className = 'wf-actions';
+
+  if (!isDefault) {
+    const dlBtn = document.createElement('button');
+    dlBtn.className = 'wf-act-btn';
+    dlBtn.textContent = '⬇';
+    dlBtn.title = '下載 workflow';
+    dlBtn.onclick = (e) => {
+      e.stopPropagation();
+      window.open(`/api/comfyui/workflows/${encodeURIComponent(name)}/download`, '_blank');
+    };
+    acts.appendChild(dlBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'wf-act-btn danger';
+    delBtn.textContent = '🗑';
+    delBtn.title = '刪除';
+    delBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`刪除「${name}」？`)) return;
+      try {
+        await api(`/api/comfyui/workflows/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        showToast(`✓ 已刪除 ${name}`);
+        refreshWorkflowStatus();
+      } catch (err) { showToast('✗ ' + err.message); }
+    };
+    acts.appendChild(delBtn);
+  }
+
+  item.appendChild(radio);
+  item.appendChild(nameEl);
+  item.appendChild(metaEl);
+  item.appendChild(acts);
+
+  // Click row to activate
+  item.onclick = async () => {
+    if (active) return;
+    try {
+      if (isDefault) {
+        await api('/api/comfyui/workflows/deactivate', { method: 'POST' });
+        showToast('✓ 已切換到內建預設');
+      } else {
+        await api(`/api/comfyui/workflows/${encodeURIComponent(name)}/activate`, { method: 'POST' });
+        showToast(`✓ 已切換到 ${name}`);
+      }
+      refreshWorkflowStatus();
+    } catch (e) { showToast('✗ ' + e.message); }
+  };
+
+  return item;
 }
 
 $('comfyuiUploadWfBtn').onclick = () => $('comfyuiWfFileInput').click();
@@ -2219,39 +2356,37 @@ $('comfyuiUploadWfBtn').onclick = () => $('comfyuiWfFileInput').click();
 $('comfyuiWfFileInput').onchange = async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+
+  const defaultName = file.name.replace(/\.json$/i, '');
+  const name = prompt('為這個 workflow 命名：', defaultName);
+  if (!name || !name.trim()) {
+    $('comfyuiWfFileInput').value = '';
+    return;
+  }
+
   const btn = $('comfyuiUploadWfBtn');
   btn.disabled = true;
   btn.textContent = '⏳ 上傳中…';
   try {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch('/api/comfyui/workflow', { method: 'POST', body: form });
+    form.append('name', name.trim());
+    const res = await fetch('/api/comfyui/workflows', { method: 'POST', body: form });
     const text = await res.text();
     if (!res.ok) {
       let msg = text;
       try { msg = JSON.parse(text).detail || msg; } catch {}
       throw new Error(msg);
     }
-    const { node_count } = JSON.parse(text);
-    showToast(`✓ Workflow 已套用（${node_count} 個節點）`);
-    await refreshWorkflowStatus();
+    const { node_count, name: savedName } = JSON.parse(text);
+    showToast(`✓ ${savedName}（${node_count} 節點）已上傳並啟用`);
+    refreshWorkflowStatus();
   } catch (err) {
     showToast('✗ ' + err.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = '⬆ 上傳自訂 Workflow';
+    btn.textContent = '⬆ 上傳新 Workflow';
     $('comfyuiWfFileInput').value = '';
-  }
-};
-
-$('comfyuiResetWfBtn').onclick = async () => {
-  if (!confirm('還原為內建預設 workflow？\n你的自訂 workflow 會被刪除。')) return;
-  try {
-    await api('/api/comfyui/workflow', { method: 'DELETE' });
-    showToast('✓ 已還原預設 workflow');
-    await refreshWorkflowStatus();
-  } catch (e) {
-    showToast('✗ ' + e.message);
   }
 };
 
