@@ -41,13 +41,33 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 /* ── Header ── */
 header {
   position: sticky; top: 0; z-index: 50;
-  display: flex; align-items: center; justify-content: space-between;
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
   padding: 0 28px; height: 58px;
   background: rgba(7,9,15,.85); backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
 
 .logo { display: flex; align-items: center; gap: 10px; }
+
+/* ── Mode toggle ── */
+.mode-toggle {
+  display: flex; align-items: center;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 3px; gap: 2px;
+}
+.mode-tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 14px; border-radius: 6px; font-size: 12.5px; font-weight: 500;
+  cursor: pointer; border: none; background: transparent;
+  color: var(--text-dim); transition: all .18s; white-space: nowrap;
+}
+.mode-tab:hover { color: var(--text); }
+.mode-tab.active {
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-2);
+  box-shadow: 0 2px 8px rgba(0,0,0,.4);
+}
+.mode-tab.active[data-mode="character"] { color: var(--accent); border-color: var(--accent-glow); }
 .logo-mark {
   width: 30px; height: 30px; border-radius: 8px;
   background: linear-gradient(135deg, var(--accent), #d97706);
@@ -762,7 +782,14 @@ video#videoPlayer {
     <div class="logo-mark">▶</div>
     <div class="logo-name">Fin<span>Vid</span></div>
   </div>
-  <div class="header-actions">
+
+  <!-- Mode toggle (center) -->
+  <div class="mode-toggle">
+    <button class="mode-tab active" data-mode="video" id="modeVideo">▶ 影片生成</button>
+    <button class="mode-tab" data-mode="character" id="modeCharacter">🎨 角色生成</button>
+  </div>
+
+  <div class="header-actions" style="justify-content:flex-end">
     <div id="runBadge" class="hidden"></div>
     <button class="btn btn-ghost" id="charsBtn">🖼 Characters</button>
     <button class="btn btn-ghost" id="voicesBtn">⚙ Voices</button>
@@ -799,8 +826,8 @@ video#videoPlayer {
     <audio id="bgmPreviewAudio" style="display:none"></audio>
   </div>
 
-  <!-- ComfyUI Card -->
-  <div class="card" id="comfyuiCard">
+  <!-- ComfyUI Card (character mode only) -->
+  <div class="card hidden" id="comfyuiCard">
     <div class="card-title"><div class="card-title-dot"></div>🎨 AI 角色生成 · ComfyUI</div>
 
     <!-- URL row -->
@@ -1090,6 +1117,57 @@ const voicesModal  = $('voicesModal');
 const lightbox     = $('lightbox');
 const lightboxImg  = $('lightboxImg');
 const toast        = $('toast');
+
+// ── Mode toggle ────────────────────────────────────────────────────────────
+
+const VIDEO_ONLY_CARDS    = ['topicCard', 'bgmCard'];
+const CHARACTER_ONLY_CARDS = ['comfyuiCard'];
+// Pipeline / previews / output / eval are managed by their own pipeline logic,
+// so we only force-hide them when entering character mode.
+const PIPELINE_CARDS = ['pipelineCard', 'previewsCard', 'outputCard', 'evalCard'];
+
+let currentMode = 'video';
+let _pipelineCardSnapshot = {};  // visibility state saved before entering character mode
+
+function setMode(mode) {
+  if (mode === currentMode) return;
+
+  if (mode === 'character') {
+    // Snapshot pipeline card visibility so we can restore it on switch-back
+    PIPELINE_CARDS.forEach(id => {
+      const el = $(id);
+      _pipelineCardSnapshot[id] = el ? !el.classList.contains('hidden') : false;
+    });
+    VIDEO_ONLY_CARDS.forEach(id => $$(id, false));
+    CHARACTER_ONLY_CARDS.forEach(id => $$(id));
+    PIPELINE_CARDS.forEach(id => $$(id, false));
+    // Keep workflow list fresh
+    if (typeof refreshWorkflowStatus === 'function') refreshWorkflowStatus();
+  } else {
+    VIDEO_ONLY_CARDS.forEach(id => $$(id));
+    CHARACTER_ONLY_CARDS.forEach(id => $$(id, false));
+    // Restore pipeline cards to the state they were in before character mode
+    PIPELINE_CARDS.forEach(id => $$(id, _pipelineCardSnapshot[id] ?? false));
+  }
+
+  currentMode = mode;
+
+  document.querySelectorAll('.mode-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.mode === mode);
+  });
+}
+
+// Helper: show (true) or hide (false) an element by id
+function $$(id, show = true) {
+  const el = $(id);
+  if (!el) return;
+  if (show) el.classList.remove('hidden');
+  else el.classList.add('hidden');
+}
+
+document.querySelectorAll('.mode-tab').forEach(tab => {
+  tab.addEventListener('click', () => setMode(tab.dataset.mode));
+});
 
 // ── API helpers ────────────────────────────────────────────────────────────
 
