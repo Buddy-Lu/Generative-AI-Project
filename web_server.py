@@ -1170,6 +1170,17 @@ async def download_named_workflow(name: str):
     )
 
 
+@app.get("/api/comfyui/workflows/{name}/json")
+async def get_named_workflow_json(name: str):
+    """Return the raw JSON content of a saved workflow for preview."""
+    from character_generator import _wf_path
+    path = _wf_path(name)
+    if not path.is_file():
+        raise HTTPException(404, "Workflow not found")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 # ── ComfyUI config endpoints ──────────────────────────────────────────────────
 
 @app.get("/api/config/comfyui")

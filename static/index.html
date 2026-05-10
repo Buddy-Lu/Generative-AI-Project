@@ -713,6 +713,43 @@ video#videoPlayer {
   border: 1.5px dashed var(--border-2); border-radius: 7px;
 }
 
+/* ── JSON Preview Modal ── */
+.wf-preview-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 150;
+  display: none; align-items: center; justify-content: center;
+  padding: 20px; backdrop-filter: blur(4px);
+}
+.wf-preview-overlay.open { display: flex; }
+.wf-preview-box {
+  background: var(--surface); border: 1px solid var(--border-2);
+  border-radius: 14px; width: 100%; max-width: 760px; max-height: 88vh;
+  display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,.7);
+}
+.wf-preview-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); gap: 10px;
+}
+.wf-preview-title {
+  font-size: 13px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
+  color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wf-preview-body {
+  flex: 1; overflow: auto; padding: 14px 18px;
+}
+.wf-preview-code {
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.65;
+  white-space: pre; color: var(--text);
+}
+.wf-preview-code .json-key   { color: #7dd3fc; }
+.wf-preview-code .json-str   { color: #86efac; }
+.wf-preview-code .json-num   { color: #fcd34d; }
+.wf-preview-code .json-bool  { color: #f9a8d4; }
+.wf-preview-code .json-null  { color: var(--text-dim); }
+.wf-preview-footer {
+  padding: 10px 18px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+}
+
 /* ── Hidden util ── */
 .hidden { display: none !important; }
 </style>
@@ -982,6 +1019,23 @@ video#videoPlayer {
         <button class="btn btn-ghost" id="voicesCancel">Cancel</button>
         <button class="btn btn-accent" id="voicesSave">Save Voices</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Workflow JSON Preview Modal -->
+<div class="wf-preview-overlay" id="wfPreviewOverlay">
+  <div class="wf-preview-box">
+    <div class="wf-preview-header">
+      <span class="wf-preview-title" id="wfPreviewTitle"></span>
+      <button class="modal-close" id="wfPreviewClose">✕</button>
+    </div>
+    <div class="wf-preview-body">
+      <pre class="wf-preview-code" id="wfPreviewCode"></pre>
+    </div>
+    <div class="wf-preview-footer">
+      <button class="btn btn-sm" id="wfPreviewCopyBtn" style="font-size:12px;padding:5px 14px;">複製 JSON</button>
+      <button class="btn btn-sm" id="wfPreviewDlBtn" style="font-size:12px;padding:5px 14px;">⬇ 下載</button>
     </div>
   </div>
 </div>
@@ -2301,6 +2355,17 @@ function _makeWfRow({ name, label, meta, active, isDefault, nodeTypes }) {
   const acts = document.createElement('div');
   acts.className = 'wf-actions';
 
+  // Preview button — available for every workflow including default
+  const previewBtn = document.createElement('button');
+  previewBtn.className = 'wf-act-btn';
+  previewBtn.textContent = '{ }';
+  previewBtn.title = '預覽 JSON';
+  previewBtn.onclick = (e) => {
+    e.stopPropagation();
+    openWfPreview(name, label, isDefault);
+  };
+  acts.appendChild(previewBtn);
+
   if (!isDefault) {
     const dlBtn = document.createElement('button');
     dlBtn.className = 'wf-act-btn';
@@ -2350,6 +2415,87 @@ function _makeWfRow({ name, label, meta, active, isDefault, nodeTypes }) {
 
   return item;
 }
+
+// ── Workflow JSON preview ──────────────────────────────────────────────────
+
+function _syntaxHighlight(json) {
+  const escaped = json
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return escaped.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    (match) => {
+      if (/^"/.test(match)) {
+        if (/:$/.test(match)) return `<span class="json-key">${match}</span>`;
+        return `<span class="json-str">${match}</span>`;
+      }
+      if (/true|false/.test(match)) return `<span class="json-bool">${match}</span>`;
+      if (/null/.test(match))       return `<span class="json-null">${match}</span>`;
+      return `<span class="json-num">${match}</span>`;
+    }
+  );
+}
+
+let _wfPreviewCurrentName = null;
+let _wfPreviewIsDefault   = false;
+
+async function openWfPreview(name, label, isDefault) {
+  _wfPreviewCurrentName = name;
+  _wfPreviewIsDefault   = isDefault;
+
+  const overlay = $('wfPreviewOverlay');
+  const titleEl = $('wfPreviewTitle');
+  const codeEl  = $('wfPreviewCode');
+
+  titleEl.textContent = label;
+  codeEl.innerHTML = '<span style="color:var(--text-dim)">載入中…</span>';
+  overlay.classList.add('open');
+
+  try {
+    const url = isDefault
+      ? '/api/comfyui/default-workflow'
+      : `/api/comfyui/workflows/${encodeURIComponent(name)}/json`;
+    const data = await api(url);
+    const pretty = JSON.stringify(data, null, 2);
+    codeEl.innerHTML = _syntaxHighlight(pretty);
+  } catch (e) {
+    codeEl.innerHTML = `<span style="color:var(--error)">載入失敗: ${e.message}</span>`;
+  }
+}
+
+$('wfPreviewClose').onclick = () => $('wfPreviewOverlay').classList.remove('open');
+$('wfPreviewOverlay').addEventListener('click', (e) => {
+  if (e.target === $('wfPreviewOverlay')) $('wfPreviewOverlay').classList.remove('open');
+});
+
+$('wfPreviewCopyBtn').onclick = async () => {
+  const text = $('wfPreviewCode').textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('✓ 已複製到剪貼簿');
+  } catch { showToast('✗ 複製失敗'); }
+};
+
+$('wfPreviewDlBtn').onclick = () => {
+  if (!_wfPreviewCurrentName) return;
+  if (_wfPreviewIsDefault) {
+    // Download default by fetching and creating a blob
+    api('/api/comfyui/default-workflow').then(data => {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'default-workflow.json';
+      a.click();
+    });
+  } else {
+    window.open(`/api/comfyui/workflows/${encodeURIComponent(_wfPreviewCurrentName)}/download`, '_blank');
+  }
+};
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') $('wfPreviewOverlay').classList.remove('open');
+});
 
 $('comfyuiUploadWfBtn').onclick = () => $('comfyuiWfFileInput').click();
 
